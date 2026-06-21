@@ -1124,6 +1124,7 @@ export default function App() {
   const [authEmail, setAuthEmail] = useState("");
   const [authPassword, setAuthPassword] = useState("");
   const [authError, setAuthError] = useState("");
+  const [isActive, setIsActive] = useState(false);
   const lastFetchedDataRef = useRef("");
 
   /* relógio para progresso ao vivo */
@@ -1143,6 +1144,7 @@ export default function App() {
         setProducts([]);
         setPrinters([]);
         setSales([]);
+        setIsActive(false);
         lastFetchedDataRef.current = "";
         setLoaded(false);
         setAuthLoading(false);
@@ -1162,6 +1164,7 @@ export default function App() {
         const dataStr = JSON.stringify(d);
         lastFetchedDataRef.current = dataStr;
 
+        setIsActive(!!d.active);
         if (d.config) setConfig(d.config);
         if (Array.isArray(d.filaments)) setFilaments(d.filaments);
         if (Array.isArray(d.products)) setProducts(d.products);
@@ -1169,13 +1172,14 @@ export default function App() {
         if (Array.isArray(d.sales)) setSales(d.sales);
       } else {
         // Se o documento não existe, inicializa
+        setIsActive(false);
         const initialStr = JSON.stringify({ config: DEFAULT_CONFIG, filaments: [], products: [], printers: [], sales: [] });
         lastFetchedDataRef.current = initialStr;
       }
       setLoaded(true);
       setAuthLoading(false);
     }, (error) => {
-      if (import.meta.env.DEV) console.error("Erro no listener do Firestore:", error);
+      console.error("Erro no listener do Firestore:", error);
       setAuthLoading(false);
       setStorageOk(false);
     });
@@ -1195,7 +1199,7 @@ export default function App() {
     const save = async () => {
       try {
         lastFetchedDataRef.current = currentDataStr;
-        await setDoc(doc(db, "users", user.uid), currentData);
+        await setDoc(doc(db, "users", user.uid), currentData, { merge: true });
         setSavedAt(Date.now());
         setStorageOk(true);
       } catch (e) {
@@ -1500,6 +1504,17 @@ export default function App() {
     );
   }
 
+  if (!isActive) {
+    return (
+      <PaymentScreen 
+        user={user} 
+        handleLogout={handleLogout} 
+        authError={authError} 
+        setAuthError={setAuthError} 
+      />
+    );
+  }
+
   return (
     <div className="ui min-h-screen bed-grid" style={{ color: "var(--ink)" }}>
       <style>{CSS}</style>
@@ -1561,6 +1576,96 @@ export default function App() {
       {saleModal && <SaleForm products={products} filaments={filaments} config={config} onSave={saveSale} onClose={() => setSaleModal(false)} />}
 
       <footer className="max-w-6xl mx-auto px-4 sm:px-6 py-6 text-center text-xs text-slate-400">Camada · seus dados ficam salvos na nuvem</footer>
+    </div>
+  );
+}
+
+function PaymentScreen({ user, handleLogout, authError, setAuthError }) {
+  const [loadingPayment, setLoadingPayment] = useState(false);
+
+  const startCheckout = async () => {
+    setLoadingPayment(true);
+    setAuthError("");
+    try {
+      const res = await fetch("http://localhost:3001/api/create-payment", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ uid: user.uid, email: user.email })
+      });
+      if (!res.ok) throw new Error("Erro ao criar link de pagamento.");
+      const data = await res.json();
+      if (data.checkoutUrl) {
+        window.location.href = data.checkoutUrl;
+      } else {
+        throw new Error("Link de checkout não retornado.");
+      }
+    } catch (err) {
+      console.error(err);
+      setAuthError("Não foi possível conectar ao servidor de pagamento. Certifique-se de que o backend está rodando localmente.");
+      setLoadingPayment(false);
+    }
+  };
+
+  return (
+    <div className="ui min-h-screen bed-grid flex flex-col items-center justify-center p-4" style={{ color: "var(--ink)" }}>
+      <div className="w-full max-w-md bg-white rounded-2xl shadow-xl overflow-hidden" style={{ border: "1px solid var(--line)" }}>
+        <div className="p-6 text-center bg-slate-900 text-white">
+          <div className="w-12 h-12 rounded-xl flex items-center justify-center mx-auto mb-3" style={{ background: "var(--accent)" }}>
+            <Layers size={24} color="#fff" />
+          </div>
+          <h1 className="font-display font-bold text-2xl tracking-tight">Ativação da Conta</h1>
+          <p className="text-xs text-slate-400 mt-1">Liberação instantânea do painel Camada</p>
+        </div>
+
+        <div className="p-6 space-y-5">
+          <div className="text-center space-y-1">
+            <h2 className="text-lg font-display font-semibold" style={{ color: "var(--ink)" }}>Adquira o Acesso Completo</h2>
+            <p className="text-xs text-slate-500">Conclua o pagamento único para liberar sua conta do painel 3D.</p>
+          </div>
+
+          <div className="p-4 rounded-xl space-y-3" style={{ background: "var(--accent-soft)" }}>
+            <div className="flex items-baseline justify-between">
+              <span className="text-sm font-semibold" style={{ color: "var(--accent-deep)" }}>Taxa Única de Ativação</span>
+              <span className="font-data font-bold text-xl" style={{ color: "var(--accent-deep)" }}>R$ 99,90</span>
+            </div>
+            <div className="text-xs space-y-1.5" style={{ color: "var(--accent-deep)" }}>
+              <div className="flex items-center gap-1.5 font-medium">✓ Acesso Vitalício sem mensalidades</div>
+              <div className="flex items-center gap-1.5 font-medium">✓ Controle de Impressoras e Filamentos</div>
+              <div className="flex items-center gap-1.5 font-medium">✓ Gráficos e Cálculo Automático de Custos</div>
+              <div className="flex items-center gap-1.5 font-medium">✓ Sincronização em nuvem segura</div>
+            </div>
+          </div>
+
+          {authError && (
+            <div className="p-3 rounded-lg text-xs font-semibold text-rose-600 bg-rose-50 border border-rose-200 flex items-center gap-2">
+              <AlertTriangle size={15} />
+              <span>{authError}</span>
+            </div>
+          )}
+
+          <button
+            type="button"
+            disabled={loadingPayment}
+            onClick={startCheckout}
+            className="w-full inline-flex items-center justify-center gap-2 text-sm font-semibold text-white py-3 rounded-lg hover:opacity-90 transition cursor-pointer disabled:opacity-50"
+            style={{ background: "var(--accent)" }}
+          >
+            {loadingPayment ? (
+              <span className="pulse-dot">Carregando Checkout...</span>
+            ) : (
+              <>
+                <CircleDollarSign size={18} />
+                <span>Pagar com Mercado Pago (PIX / Cartão)</span>
+              </>
+            )}
+          </button>
+        </div>
+
+        <div className="p-4 bg-slate-50 flex items-center justify-between text-xs text-slate-500 border-t border-slate-100">
+          <span>Logado como: <b>{user.email}</b></span>
+          <button onClick={handleLogout} className="text-rose-600 font-semibold hover:underline">Sair</button>
+        </div>
+      </div>
     </div>
   );
 }
