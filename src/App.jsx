@@ -107,7 +107,7 @@ function parseNum(s) {
   const n = parseFloat(t);
   return isFinite(n) ? n : 0;
 }
-const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+const uid = () => crypto.randomUUID();
 const shorten = (s, n = 14) => (s && s.length > n ? s.slice(0, n - 1) + "…" : s || "");
 const todayISO = () => new Date().toISOString().slice(0, 10);
 
@@ -1175,7 +1175,7 @@ export default function App() {
       setLoaded(true);
       setAuthLoading(false);
     }, (error) => {
-      console.error("Erro no listener do Firestore:", error);
+      if (import.meta.env.DEV) console.error("Erro no listener do Firestore:", error);
       setAuthLoading(false);
       setStorageOk(false);
     });
@@ -1199,7 +1199,7 @@ export default function App() {
         setSavedAt(Date.now());
         setStorageOk(true);
       } catch (e) {
-        console.error("Erro ao salvar no Firestore:", e);
+        if (import.meta.env.DEV) console.error("Erro ao salvar no Firestore:", e);
         setStorageOk(false);
       }
     };
@@ -1216,7 +1216,7 @@ export default function App() {
     try {
       await signInWithEmailAndPassword(auth, authEmail, authPassword);
     } catch (err) {
-      console.error(err);
+      if (import.meta.env.DEV) console.error(err);
       let errMsg = "Erro ao fazer login. Verifique as credenciais.";
       if (err.code === "auth/invalid-credential" || err.code === "auth/wrong-password" || err.code === "auth/user-not-found") {
         errMsg = "E-mail ou senha incorretos.";
@@ -1235,15 +1235,15 @@ export default function App() {
       setAuthError("Preencha todos os campos.");
       return;
     }
-    if (authPassword.length < 6) {
-      setAuthError("A senha precisa ter no mínimo 6 caracteres.");
+    if (authPassword.length < 8) {
+      setAuthError("A senha precisa ter no mínimo 8 caracteres.");
       return;
     }
     setAuthLoading(true);
     try {
       await createUserWithEmailAndPassword(auth, authEmail, authPassword);
     } catch (err) {
-      console.error(err);
+      if (import.meta.env.DEV) console.error(err);
       let errMsg = "Erro ao criar conta.";
       if (err.code === "auth/email-already-in-use") {
         errMsg = "Este e-mail já está em uso.";
@@ -1262,7 +1262,7 @@ export default function App() {
     try {
       await signInWithPopup(auth, provider);
     } catch (err) {
-      console.error(err);
+      if (import.meta.env.DEV) console.error(err);
       let errMsg = "Erro ao fazer login com o Google.";
       if (err.code === "auth/popup-closed-by-user") {
         errMsg = "O login do Google foi fechado antes de ser concluído.";
@@ -1279,7 +1279,7 @@ export default function App() {
       try {
         await signOut(auth);
       } catch (err) {
-        console.error("Erro ao sair:", err);
+        if (import.meta.env.DEV) console.error("Erro ao sair:", err);
       }
     }
   };
@@ -1389,13 +1389,21 @@ export default function App() {
     reader.onload = () => {
       try {
         const d = JSON.parse(reader.result);
+        if (typeof d !== "object" || d === null || Array.isArray(d)) throw new Error("formato inválido");
+        const ALLOWED_KEYS = new Set(["config", "filaments", "products", "printers", "sales"]);
+        for (const k of Object.keys(d)) { if (!ALLOWED_KEYS.has(k)) throw new Error("chave inesperada"); }
+        const sanitizeList = (arr, maxLen = 500) => {
+          if (!Array.isArray(arr)) return [];
+          if (arr.length > maxLen) throw new Error("lista muito grande");
+          return arr.filter((item) => typeof item === "object" && item !== null && !Array.isArray(item));
+        };
         let cfg = { ...DEFAULT_CONFIG, ...(d.config || {}) };
         if (!Array.isArray(cfg.plataformas)) cfg.plataformas = DEFAULT_CONFIG.plataformas;
         setConfig(cfg);
-        setFilaments(Array.isArray(d.filaments) ? d.filaments : []);
-        setProducts(Array.isArray(d.products) ? d.products : []);
-        setPrinters(Array.isArray(d.printers) ? d.printers : []);
-        setSales(Array.isArray(d.sales) ? d.sales : []);
+        setFilaments(sanitizeList(d.filaments));
+        setProducts(sanitizeList(d.products));
+        setPrinters(sanitizeList(d.printers, 100));
+        setSales(sanitizeList(d.sales, 5000));
         setTab("painel");
       } catch (e) { window.alert("Arquivo inválido. Use um backup exportado por este painel."); }
     };
