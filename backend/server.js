@@ -58,7 +58,7 @@ app.post("/api/create-payment", async (req, res) => {
       }
     });
 
-    res.json({ checkoutUrl: response.init_point });
+    res.json({ id: response.id, checkoutUrl: response.init_point });
   } catch (error) {
     console.error("Erro ao criar preferência do Mercado Pago:", error);
     res.status(500).json({ error: "Não foi possível gerar o link de pagamento" });

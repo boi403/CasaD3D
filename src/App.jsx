@@ -19,6 +19,10 @@ import {
   signInWithPopup
 } from "firebase/auth";
 import { doc, onSnapshot, setDoc } from "firebase/firestore";
+import { initMercadoPago, Wallet as MpWallet } from "@mercadopago/sdk-react";
+
+// Inicializa o Mercado Pago
+initMercadoPago(import.meta.env.VITE_MERCADOPAGO_PUBLIC_KEY || "SUA_PUBLIC_KEY_AQUI");
 
 // Fallback para window.storage caso esteja rodando num navegador comum
 if (typeof window !== "undefined" && !window.storage) {
@@ -1600,30 +1604,35 @@ export default function App() {
 }
 
 function PaymentScreen({ user, handleLogout, authError, setAuthError }) {
-  const [loadingPayment, setLoadingPayment] = useState(false);
+  const [preferenceId, setPreferenceId] = useState(null);
+  const [loading, setLoading] = useState(true);
 
-  const startCheckout = async () => {
-    setLoadingPayment(true);
-    setAuthError("");
-    try {
-      const res = await fetch("http://localhost:3001/api/create-payment", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ uid: user.uid, email: user.email })
-      });
-      if (!res.ok) throw new Error("Erro ao criar link de pagamento.");
-      const data = await res.json();
-      if (data.checkoutUrl) {
-        window.location.href = data.checkoutUrl;
-      } else {
-        throw new Error("Link de checkout não retornado.");
+  useEffect(() => {
+    const fetchPreference = async () => {
+      try {
+        setLoading(true);
+        setAuthError("");
+        const res = await fetch("http://localhost:3001/api/create-payment", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ uid: user.uid, email: user.email })
+        });
+        if (!res.ok) throw new Error("Erro ao gerar preferência de pagamento.");
+        const data = await res.json();
+        if (data.id) {
+          setPreferenceId(data.id);
+        } else {
+          throw new Error("Não foi retornado um ID de preferência de pagamento válido.");
+        }
+      } catch (err) {
+        console.error(err);
+        setAuthError("Não foi possível gerar o botão de pagamento. Verifique se o servidor backend está ativo.");
+      } finally {
+        setLoading(false);
       }
-    } catch (err) {
-      console.error(err);
-      setAuthError("Não foi possível conectar ao servidor de pagamento. Certifique-se de que o backend está rodando localmente.");
-      setLoadingPayment(false);
-    }
-  };
+    };
+    fetchPreference();
+  }, [user, setAuthError]);
 
   return (
     <div className="ui min-h-screen bed-grid flex flex-col items-center justify-center p-4" style={{ color: "var(--ink)" }}>
@@ -1662,22 +1671,24 @@ function PaymentScreen({ user, handleLogout, authError, setAuthError }) {
             </div>
           )}
 
-          <button
-            type="button"
-            disabled={loadingPayment}
-            onClick={startCheckout}
-            className="w-full inline-flex items-center justify-center gap-2 text-sm font-semibold text-white py-3 rounded-lg hover:opacity-90 transition cursor-pointer disabled:opacity-50"
-            style={{ background: "var(--accent)" }}
-          >
-            {loadingPayment ? (
-              <span className="pulse-dot">Carregando Checkout...</span>
-            ) : (
-              <>
-                <CircleDollarSign size={18} />
-                <span>Pagar com Mercado Pago (PIX / Cartão)</span>
-              </>
-            )}
-          </button>
+          {loading ? (
+            <div className="text-center text-xs py-4 text-slate-400 font-semibold pulse-dot">
+              Gerando botão de pagamento seguro...
+            </div>
+          ) : preferenceId ? (
+            <div className="w-full">
+              <MpWallet initialization={{ preferenceId }} />
+            </div>
+          ) : (
+            <button
+              type="button"
+              disabled
+              className="w-full inline-flex items-center justify-center gap-2 text-sm font-semibold text-white py-3 rounded-lg opacity-50"
+              style={{ background: "var(--accent)" }}
+            >
+              Erro ao carregar checkout
+            </button>
+          )}
         </div>
 
         <div className="p-4 bg-slate-50 flex items-center justify-between text-xs text-slate-500 border-t border-slate-100">
