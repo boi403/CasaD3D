@@ -1133,6 +1133,25 @@ export default function App() {
     return () => clearInterval(i);
   }, []);
 
+  // Trata o retorno de pagamento do Mercado Pago (Callback Redirects)
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const status = params.get("status");
+    if (status === "rejected") {
+      setAuthError("O pagamento foi recusado pelo banco/cartão. Por favor, tente novamente.");
+      window.history.replaceState({}, document.title, window.location.pathname);
+    } else if (status === "cancelled") {
+      setAuthError("O pagamento foi cancelado antes de ser concluído.");
+      window.history.replaceState({}, document.title, window.location.pathname);
+    } else if (status === "pending") {
+      setAuthError("Seu pagamento está pendente de processamento. Assim que aprovado, seu painel será liberado!");
+      window.history.replaceState({}, document.title, window.location.pathname);
+    } else if (status === "approved") {
+      // O acesso será liberado em tempo real pelo Firestore, limpamos apenas os parâmetros da URL
+      window.history.replaceState({}, document.title, window.location.pathname);
+    }
+  }, []);
+
   // 1. Escuta mudanças no estado de autenticação
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, (currentUser) => {

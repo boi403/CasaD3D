@@ -34,7 +34,8 @@ app.post("/api/create-payment", async (req, res) => {
   }
 
   try {
-    const preference = await new Preference(mpClient).create({
+    const preference = new Preference(mpClient);
+    const response = await preference.create({
       body: {
         items: [
           {
@@ -57,7 +58,7 @@ app.post("/api/create-payment", async (req, res) => {
       }
     });
 
-    res.json({ checkoutUrl: preference.init_point });
+    res.json({ checkoutUrl: response.init_point });
   } catch (error) {
     console.error("Erro ao criar preferência do Mercado Pago:", error);
     res.status(500).json({ error: "Não foi possível gerar o link de pagamento" });
