@@ -3,12 +3,20 @@ import {
   LayoutDashboard, Boxes, Package, Settings as SettingsIcon, Plus, Pencil,
   Trash2, Zap, Clock, TrendingUp, AlertTriangle, X, Layers, Wallet,
   ShoppingBag, Tag, Database, Download, Upload, Printer, CircleDollarSign,
-  Play, CheckCircle2, XCircle, Wrench, Trophy, Activity, ShoppingCart,
+  Play, CheckCircle2, XCircle, Wrench, Trophy, Activity, ShoppingCart, LogOut,
 } from "lucide-react";
 import {
   ResponsiveContainer, BarChart, Bar, XAxis, YAxis, Tooltip, CartesianGrid,
   PieChart, Pie, Cell, Legend,
 } from "recharts";
+import { auth, db } from "./firebase";
+import { 
+  onAuthStateChanged, 
+  signInWithEmailAndPassword, 
+  createUserWithEmailAndPassword, 
+  signOut 
+} from "firebase/auth";
+import { doc, onSnapshot, setDoc } from "firebase/firestore";
 
 // Fallback para window.storage caso esteja rodando num navegador comum
 if (typeof window !== "undefined" && !window.storage) {
@@ -1107,49 +1115,153 @@ export default function App() {
   const [jobModal, setJobModal] = useState(null);   // printer
   const [saleModal, setSaleModal] = useState(false);
 
+  // Estados de Autenticação do Firebase
+  const [user, setUser] = useState(null);
+  const [authLoading, setAuthLoading] = useState(true);
+  const [authMode, setAuthMode] = useState("login"); // "login" | "register"
+  const [authEmail, setAuthEmail] = useState("");
+  const [authPassword, setAuthPassword] = useState("");
+  const [authError, setAuthError] = useState("");
+  const lastFetchedDataRef = useRef("");
+
   /* relógio para progresso ao vivo */
   useEffect(() => {
     const i = setInterval(() => setNow(Date.now()), 15000);
     return () => clearInterval(i);
   }, []);
 
-  /* carregar + migração */
+  // 1. Escuta mudanças no estado de autenticação
   useEffect(() => {
-    (async () => {
-      try {
-        const res = await window.storage.get(STORAGE_KEY);
-        if (res && res.value) {
-          const d = JSON.parse(res.value);
-          let cfg = { ...DEFAULT_CONFIG, ...(d.config || {}) };
-          if (!Array.isArray(cfg.plataformas)) {
-            cfg.plataformas = [{ id: "ml", nome: "Mercado Livre", taxa: d.config && d.config.taxaMercadoLivre != null ? d.config.taxaMercadoLivre : 14 }, { id: "shopee", nome: "Shopee", taxa: 20 }];
-            if (d.config && d.config.taxaShopify != null) cfg.plataformas.push({ id: uid(), nome: "Shopify", taxa: d.config.taxaShopify });
-          }
-          delete cfg.taxaShopify; delete cfg.taxaMercadoLivre;
-          setConfig(cfg);
-          if (Array.isArray(d.filaments)) setFilaments(d.filaments);
-          if (Array.isArray(d.products)) setProducts(d.products);
-          if (Array.isArray(d.printers)) setPrinters(d.printers);
-          if (Array.isArray(d.sales)) setSales(d.sales);
-        }
-      } catch (e) {
-        if (typeof window === "undefined" || !window.storage) setStorageOk(false);
-      } finally {
-        setLoaded(true);
+    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
+      setUser(currentUser);
+      if (!currentUser) {
+        // Limpa estados locais ao deslogar
+        setConfig(DEFAULT_CONFIG);
+        setFilaments([]);
+        setProducts([]);
+        setPrinters([]);
+        setSales([]);
+        lastFetchedDataRef.current = "";
+        setLoaded(false);
+        setAuthLoading(false);
       }
-    })();
+    });
+    return () => unsubscribe();
   }, []);
 
-  /* salvar */
+  // 2. Escuta mudanças no Firestore quando logado
   useEffect(() => {
-    if (!loaded) return;
-    (async () => {
+    if (!user) return;
+    setLoaded(false);
+    const docRef = doc(db, "users", user.uid);
+    const unsubscribe = onSnapshot(docRef, (docSnap) => {
+      if (docSnap.exists()) {
+        const d = docSnap.data();
+        const dataStr = JSON.stringify(d);
+        lastFetchedDataRef.current = dataStr;
+
+        if (d.config) setConfig(d.config);
+        if (Array.isArray(d.filaments)) setFilaments(d.filaments);
+        if (Array.isArray(d.products)) setProducts(d.products);
+        if (Array.isArray(d.printers)) setPrinters(d.printers);
+        if (Array.isArray(d.sales)) setSales(d.sales);
+      } else {
+        // Se o documento não existe, inicializa
+        const initialStr = JSON.stringify({ config: DEFAULT_CONFIG, filaments: [], products: [], printers: [], sales: [] });
+        lastFetchedDataRef.current = initialStr;
+      }
+      setLoaded(true);
+      setAuthLoading(false);
+    }, (error) => {
+      console.error("Erro no listener do Firestore:", error);
+      setAuthLoading(false);
+      setStorageOk(false);
+    });
+
+    return () => unsubscribe();
+  }, [user]);
+
+  // 3. Salva no Firestore quando houver modificações locais
+  useEffect(() => {
+    if (!user || !loaded) return;
+    const currentData = { config, filaments, products, printers, sales };
+    const currentDataStr = JSON.stringify(currentData);
+
+    // Evita loop infinito comparando com o último fetch do Firestore
+    if (currentDataStr === lastFetchedDataRef.current) return;
+
+    const save = async () => {
       try {
-        await window.storage.set(STORAGE_KEY, JSON.stringify({ config, filaments, products, printers, sales }));
+        lastFetchedDataRef.current = currentDataStr;
+        await setDoc(doc(db, "users", user.uid), currentData);
         setSavedAt(Date.now());
-      } catch (e) { setStorageOk(false); }
-    })();
-  }, [config, filaments, products, printers, sales, loaded]);
+        setStorageOk(true);
+      } catch (e) {
+        console.error("Erro ao salvar no Firestore:", e);
+        setStorageOk(false);
+      }
+    };
+
+    // Debounce de 1 segundo para evitar chamadas excessivas ao Firestore
+    const t = setTimeout(save, 1000);
+    return () => clearTimeout(t);
+  }, [config, filaments, products, printers, sales, user, loaded]);
+
+  const handleLogin = async (e) => {
+    e.preventDefault();
+    setAuthError("");
+    setAuthLoading(true);
+    try {
+      await signInWithEmailAndPassword(auth, authEmail, authPassword);
+    } catch (err) {
+      console.error(err);
+      let errMsg = "Erro ao fazer login. Verifique as credenciais.";
+      if (err.code === "auth/invalid-credential" || err.code === "auth/wrong-password" || err.code === "auth/user-not-found") {
+        errMsg = "E-mail ou senha incorretos.";
+      } else if (err.code === "auth/invalid-email") {
+        errMsg = "Formato de e-mail inválido.";
+      }
+      setAuthError(errMsg);
+      setAuthLoading(false);
+    }
+  };
+
+  const handleRegister = async (e) => {
+    e.preventDefault();
+    setAuthError("");
+    if (!authEmail.trim() || !authPassword) {
+      setAuthError("Preencha todos os campos.");
+      return;
+    }
+    if (authPassword.length < 6) {
+      setAuthError("A senha precisa ter no mínimo 6 caracteres.");
+      return;
+    }
+    setAuthLoading(true);
+    try {
+      await createUserWithEmailAndPassword(auth, authEmail, authPassword);
+    } catch (err) {
+      console.error(err);
+      let errMsg = "Erro ao criar conta.";
+      if (err.code === "auth/email-already-in-use") {
+        errMsg = "Este e-mail já está em uso.";
+      } else if (err.code === "auth/invalid-email") {
+        errMsg = "Formato de e-mail inválido.";
+      }
+      setAuthError(errMsg);
+      setAuthLoading(false);
+    }
+  };
+
+  const handleLogout = async () => {
+    if (window.confirm("Deseja realmente sair?")) {
+      try {
+        await signOut(auth);
+      } catch (err) {
+        console.error("Erro ao sair:", err);
+      }
+    }
+  };
 
   /* filamentos */
   const saveFil = (f) => { setFilaments((a) => a.some((x) => x.id === f.id) ? a.map((x) => (x.id === f.id ? f : x)) : [...a, f]); setFilModal(null); };
@@ -1278,6 +1390,71 @@ export default function App() {
     { id: "config", label: "Configurações", icon: SettingsIcon },
   ];
 
+  if (authLoading) {
+    return (
+      <div className="ui min-h-screen bed-grid flex flex-col items-center justify-center bg-slate-50" style={{ color: "var(--ink)" }}>
+        <style>{CSS}</style>
+        <div className="flex flex-col items-center gap-3">
+          <div className="w-12 h-12 rounded-xl flex items-center justify-center pulse-dot" style={{ background: "var(--accent)" }}>
+            <Layers size={24} color="#fff" />
+          </div>
+          <h2 className="font-display font-bold text-xl text-slate-800">Carregando o Camada...</h2>
+          <p className="text-xs text-slate-400">Sincronizando seus dados com a nuvem</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (!user) {
+    return (
+      <div className="ui min-h-screen bed-grid flex flex-col items-center justify-center p-4" style={{ color: "var(--ink)" }}>
+        <style>{CSS}</style>
+        <div className="w-full max-w-md bg-white rounded-2xl shadow-xl overflow-hidden" style={{ border: "1px solid var(--line)" }}>
+          <div className="p-6 text-center bg-slate-900 text-white">
+            <div className="w-12 h-12 rounded-xl flex items-center justify-center mx-auto mb-3" style={{ background: "var(--accent)" }}>
+              <Layers size={24} color="#fff" />
+            </div>
+            <h1 className="font-display font-bold text-2xl tracking-tight">Camada</h1>
+            <p className="text-xs text-slate-400 mt-1">Gestão inteligente de Impressão 3D</p>
+          </div>
+
+          <div className="p-6 space-y-4">
+            <div className="flex rounded-lg overflow-hidden" style={{ border: "1px solid var(--line)" }}>
+              <button onClick={() => { setAuthMode("login"); setAuthError(""); }} className="flex-1 text-sm py-2 px-3 font-semibold transition" style={{ background: authMode === "login" ? "var(--accent)" : "#fff", color: authMode === "login" ? "#fff" : "var(--muted)" }}>Entrar</button>
+              <button onClick={() => { setAuthMode("register"); setAuthError(""); }} className="flex-1 text-sm py-2 px-3 font-semibold transition" style={{ background: authMode === "register" ? "var(--accent)" : "#fff", color: authMode === "register" ? "#fff" : "var(--muted)" }}>Criar Conta</button>
+            </div>
+
+            {authError && (
+              <div className="p-3 rounded-lg text-xs font-semibold text-rose-600 bg-rose-50 border border-rose-200 flex items-center gap-2">
+                <AlertTriangle size={15} />
+                <span>{authError}</span>
+              </div>
+            )}
+
+            <form onSubmit={authMode === "login" ? handleLogin : handleRegister} className="space-y-4">
+              <label className="block">
+                <span className="block text-xs font-medium text-slate-500 mb-1">E-mail</span>
+                <input type="email" required value={authEmail} onChange={(e) => setAuthEmail(e.target.value)} placeholder="exemplo@email.com" className="w-full bg-white px-3 py-2 text-sm rounded-lg outline-none ui" style={{ border: "1px solid var(--line)", color: "var(--ink)" }} />
+              </label>
+
+              <label className="block">
+                <span className="block text-xs font-medium text-slate-500 mb-1">Senha</span>
+                <input type="password" required value={authPassword} onChange={(e) => setAuthPassword(e.target.value)} placeholder="Mínimo 6 caracteres" className="w-full bg-white px-3 py-2 text-sm rounded-lg outline-none ui" style={{ border: "1px solid var(--line)", color: "var(--ink)" }} />
+              </label>
+
+              <button type="submit" className="w-full inline-flex items-center justify-center text-sm font-semibold text-white py-2.5 rounded-lg hover:opacity-90 transition" style={{ background: "var(--accent)" }}>
+                {authMode === "login" ? "Entrar no Painel" : "Criar Minha Conta"}
+              </button>
+            </form>
+          </div>
+          <div className="p-4 bg-slate-50 text-center text-xs text-slate-400 border-t border-slate-100">
+            {authMode === "login" ? "Novo por aqui? Crie sua conta grátis." : "Já tem conta? Faça login acima."}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="ui min-h-screen bed-grid" style={{ color: "var(--ink)" }}>
       <style>{CSS}</style>
@@ -1291,8 +1468,16 @@ export default function App() {
               <div className="text-xs text-slate-400 leading-none mt-1">gestão de impressão 3D</div>
             </div>
           </div>
-          <div className="text-xs">
-            {!storageOk ? <span className="flex items-center gap-1 text-amber-400"><AlertTriangle size={13} /> dados não serão salvos</span> : savedAt ? <span className="text-slate-400 font-data">salvo automaticamente</span> : null}
+          <div className="flex items-center gap-4 text-xs">
+            {!storageOk ? (
+              <span className="flex items-center gap-1 text-amber-400"><AlertTriangle size={13} /> erro ao salvar</span>
+            ) : savedAt ? (
+              <span className="text-slate-400 font-data">salvo na nuvem</span>
+            ) : null}
+            <span className="text-slate-300 font-medium truncate max-w-40 hidden sm:inline">{user.email}</span>
+            <button onClick={handleLogout} className="p-1.5 rounded-lg text-slate-400 hover:text-rose-500 hover:bg-slate-800 transition" title="Sair da conta">
+              <LogOut size={16} />
+            </button>
           </div>
         </div>
         <div className="layer-edge" />
@@ -1330,7 +1515,7 @@ export default function App() {
       {jobModal && <JobForm printer={jobModal} products={products} filaments={filaments} config={config} onStart={startJob} onClose={() => setJobModal(null)} />}
       {saleModal && <SaleForm products={products} filaments={filaments} config={config} onSave={saveSale} onClose={() => setSaleModal(false)} />}
 
-      <footer className="max-w-6xl mx-auto px-4 sm:px-6 py-6 text-center text-xs text-slate-400">Camada · seus dados ficam salvos neste navegador</footer>
+      <footer className="max-w-6xl mx-auto px-4 sm:px-6 py-6 text-center text-xs text-slate-400">Camada · seus dados ficam salvos na nuvem</footer>
     </div>
   );
 }
