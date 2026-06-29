@@ -43,6 +43,10 @@ app.post("/api/create-payment", async (req, res) => {
   }
 
   try {
+    let successUrl = allowedOrigins[0];
+    if (successUrl.includes("localhost") || successUrl.startsWith("http://")) {
+      successUrl = "https://casad3d-26d59.web.app";
+    }
     const preference = new Preference(mpClient);
     const response = await preference.create({
       body: {
@@ -50,9 +54,9 @@ app.post("/api/create-payment", async (req, res) => {
         payer: { email },
         external_reference: uid,
         back_urls: {
-          success: allowedOrigins[0],
-          failure: allowedOrigins[0],
-          pending: allowedOrigins[0]
+          success: successUrl,
+          failure: successUrl,
+          pending: successUrl
         },
         auto_return: "approved"
       }
