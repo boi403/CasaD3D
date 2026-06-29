@@ -26,3 +26,9 @@ serviceAccountKey.json
 *.njsproj
 *.sln
 *.sw?
+skillspector/
+skillspector_report.md
+.skillspector-baseline.yaml
+
+
+

@@ -45,9 +45,7 @@ if (typeof window !== "undefined" && !window.storage) {
   };
 }
 
-/* ------------------------------------------------------------------ */
-/*  Constantes                                                         */
-/* ------------------------------------------------------------------ */
+// === Constantes ===
 const STORAGE_KEY = "camada-print3d-v1";
 
 const DEFAULT_CONFIG = {
@@ -56,6 +54,10 @@ const DEFAULT_CONFIG = {
   maoDeObraHora: 0,      // R$/h de operação/acabamento
   custoFalhaPct: 5,      // % de buffer para falhas/desperdício
   margemPadrao: 120,     // % de margem sobre o custo
+  metodoPrecificacao: "markup_custo", // "markup_custo" | "markup_divisor"
+  despesasFixasMensais: 19400,
+  faturamentoMensal: 300000,
+  impostosPct: 9.25,
   plataformas: [
     { id: "ml", nome: "Mercado Livre", taxa: 14 },
     { id: "shopee", nome: "Shopee", taxa: 20 },
@@ -96,9 +98,7 @@ input:focus-visible, select:focus-visible, button:focus-visible{ outline:2px sol
 @media (prefers-reduced-motion: reduce){ *{ transition:none !important; animation:none !important; } }
 `;
 
-/* ------------------------------------------------------------------ */
-/*  Helpers                                                            */
-/* ------------------------------------------------------------------ */
+// === Helpers ===
 const brl = (v) => (isFinite(v) ? v : 0).toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
 const num = (v, d = 0) => (isFinite(v) ? v : 0).toLocaleString("pt-BR", { minimumFractionDigits: d, maximumFractionDigits: d });
 
@@ -124,9 +124,7 @@ function horasFmt(h) {
   return `${mm}min`;
 }
 
-/* ------------------------------------------------------------------ */
-/*  Motor de cálculo                                                   */
-/* ------------------------------------------------------------------ */
+// === Motor de cálculo ===
 function custoPorGrama(fil) {
   if (!fil || !fil.pesoCompradoG) return 0;
   return fil.custoCompra / fil.pesoCompradoG;
@@ -141,32 +139,59 @@ function calcProduto(p, fil, config) {
   const custoEnergia = (p.tempoHoras || 0) * ((config.potenciaW || 0) / 1000) * (config.energiaKwh || 0);
   const custoMao = (p.tempoHoras || 0) * (config.maoDeObraHora || 0);
   const extras = p.custosExtras || 0;
+  const custoArmazenagem = p.custoArmazenagem || 0;
   const subtotal = custoFil + custoEnergia + custoMao + extras;
   const buffer = subtotal * ((config.custoFalhaPct || 0) / 100);
   const custoTotal = subtotal + buffer;
   const margem = p.margem != null && p.margem !== "" ? p.margem : config.margemPadrao;
   const taxa = taxaPlataforma(p.plataforma, config);
-  const fator = taxa < 100 ? 1 - taxa / 100 : 1;
-  const precoSugerido = (custoTotal * (1 + margem / 100)) / fator;
-  const preco = p.precoVenda && p.precoVenda > 0 ? p.precoVenda : precoSugerido;
-  const receitaLiquida = preco * fator;
-  const lucro = receitaLiquida - custoTotal;
-  const margemReal = custoTotal > 0 ? (lucro / custoTotal) * 100 : 0;
-  return { cpg, custoFil, custoEnergia, custoMao, extras, buffer, custoTotal, margem, taxa, precoSugerido, preco, receitaLiquida, lucro, margemReal };
+
+  if (config.metodoPrecificacao === "markup_divisor") {
+    const despesasFixasPct = (config.despesasFixasMensais || 0) / (config.faturamentoMensal || 1) * 100;
+    const impostosPct = config.impostosPct || 0;
+    const divisor = 1 - (taxa + impostosPct + despesasFixasPct + margem) / 100;
+    const divisorSeguro = Math.max(0.01, divisor);
+    const precoSugerido = (custoTotal + custoArmazenagem) / divisorSeguro;
+    const preco = p.precoVenda && p.precoVenda > 0 ? p.precoVenda : precoSugerido;
+    const receitaLiquida = preco * (1 - (taxa + impostosPct) / 100);
+    const lucro = preco * (1 - (taxa + impostosPct + despesasFixasPct) / 100) - (custoTotal + custoArmazenagem);
+    const margemReal = (custoTotal + custoArmazenagem) > 0 ? (lucro / (custoTotal + custoArmazenagem)) * 100 : 0;
+    const custoTotalProduto = preco - lucro;
+    return { cpg, custoFil, custoEnergia, custoMao, extras, buffer, custoTotal, margem, taxa, precoSugerido, preco, receitaLiquida, lucro, margemReal, custoArmazenagem, custoTotalProduto };
+  } else {
+    const fator = taxa < 100 ? 1 - taxa / 100 : 1;
+    const precoSugerido = ((custoTotal + custoArmazenagem) * (1 + margem / 100)) / fator;
+    const preco = p.precoVenda && p.precoVenda > 0 ? p.precoVenda : precoSugerido;
+    const receitaLiquida = preco * fator;
+    const lucro = receitaLiquida - (custoTotal + custoArmazenagem);
+    const margemReal = (custoTotal + custoArmazenagem) > 0 ? (lucro / (custoTotal + custoArmazenagem)) * 100 : 0;
+    const custoTotalProduto = custoTotal + custoArmazenagem;
+    return { cpg, custoFil, custoEnergia, custoMao, extras, buffer, custoTotal, margem, taxa, precoSugerido, preco, receitaLiquida, lucro, margemReal, custoArmazenagem, custoTotalProduto };
+  }
 }
 function calcVenda(sale, product, fil, config) {
   const fee = taxaPlataforma(sale.plataforma, config);
   const receitaBruta = (sale.precoUnit || 0) * (sale.quantidade || 0);
-  const receitaLiq = receitaBruta * (1 - fee / 100);
-  const c = product ? calcProduto(product, fil, config) : { custoTotal: 0 };
-  const custo = c.custoTotal * (sale.quantidade || 0);
-  const lucro = receitaLiq - custo;
-  return { fee, receitaBruta, receitaLiq, custo, lucro };
+
+  if (config.metodoPrecificacao === "markup_divisor") {
+    const despesasFixasPct = (config.despesasFixasMensais || 0) / (config.faturamentoMensal || 1) * 100;
+    const impostosPct = config.impostosPct || 0;
+    const receitaLiq = receitaBruta * (1 - (fee + impostosPct) / 100);
+    const c = product ? calcProduto(product, fil, config) : { custoTotal: 0, custoArmazenagem: 0 };
+    const custoProducao = (c.custoTotal + (product?.custoArmazenagem || 0)) * (sale.quantidade || 0);
+    const custoFixoRateado = receitaBruta * (despesasFixasPct / 100);
+    const lucro = receitaLiq - custoProducao - custoFixoRateado;
+    return { fee, receitaBruta, receitaLiq, custo: custoProducao + custoFixoRateado, lucro };
+  } else {
+    const receitaLiq = receitaBruta * (1 - fee / 100);
+    const c = product ? calcProduto(product, fil, config) : { custoTotal: 0, custoArmazenagem: 0 };
+    const custo = (c.custoTotal + (product?.custoArmazenagem || 0)) * (sale.quantidade || 0);
+    const lucro = receitaLiq - custo;
+    return { fee, receitaBruta, receitaLiq, custo, lucro };
+  }
 }
 
-/* ------------------------------------------------------------------ */
-/*  UI primitivos                                                      */
-/* ------------------------------------------------------------------ */
+// === UI primitivos ===
 function Card({ children, className = "" }) {
   return <div className={`bg-white rounded-xl shadow-sm ${className}`} style={{ border: "1px solid var(--line)" }}>{children}</div>;
 }
@@ -298,9 +323,7 @@ function useVendaStats(sales, products, filaments, config, periodo) {
   }, [sales, products, filaments, config, periodo]);
 }
 
-/* ------------------------------------------------------------------ */
-/*  Painel                                                             */
-/* ------------------------------------------------------------------ */
+// === Painel ===
 function Painel({ filaments, products, printers, sales, config, now, go }) {
   const valorEstoque = filaments.reduce((s, f) => s + (f.pesoEstoqueG || 0) * custoPorGrama(f), 0);
   const baixos = filaments.filter((f) => (f.pesoEstoqueG || 0) <= (f.alertaG || 0));
@@ -479,9 +502,7 @@ function StatusDot({ status }) {
   );
 }
 
-/* ------------------------------------------------------------------ */
-/*  Impressoras                                                        */
-/* ------------------------------------------------------------------ */
+// === Impressoras ===
 function Impressoras({ printers, products, config, now, onAdd, onEdit, onDelete, onStartJob, onFinishJob, onCancelJob, onSetStatus }) {
   return (
     <div className="space-y-4">
@@ -623,9 +644,7 @@ function JobForm({ printer, products, filaments, config, onStart, onClose }) {
   );
 }
 
-/* ------------------------------------------------------------------ */
-/*  Filamentos                                                         */
-/* ------------------------------------------------------------------ */
+// === Filamentos ===
 function Filamentos({ filaments, onAdd, onEdit, onDelete }) {
   return (
     <div className="space-y-4">
@@ -718,9 +737,7 @@ function FilamentForm({ initial, onSave, onClose }) {
   );
 }
 
-/* ------------------------------------------------------------------ */
-/*  Produtos                                                           */
-/* ------------------------------------------------------------------ */
+// === Produtos ===
 function Produtos({ products, filaments, config, onAdd, onEdit, onDelete, go }) {
   if (filaments.length === 0) {
     return (
@@ -761,11 +778,16 @@ function Produtos({ products, filaments, config, onAdd, onEdit, onDelete, go }) 
                   {p.estoqueProduto > 0 && <Chip>{num(p.estoqueProduto)} em estoque</Chip>}
                 </div>
                 <div className="mt-3 grid grid-cols-3 gap-2 text-center py-3 rounded-lg" style={{ background: "#f8fafc" }}>
-                  <div><div className="text-xs text-slate-400">Custo</div><div className="font-data text-sm" style={{ color: "var(--ink)" }}>{brl(c.custoTotal)}</div></div>
+                  <div><div className="text-xs text-slate-400">{config.metodoPrecificacao === "markup_divisor" ? "Custo Total" : "Custo Unit."}</div><div className="font-data text-sm" style={{ color: "var(--ink)" }}>{brl(config.metodoPrecificacao === "markup_divisor" ? c.custoTotalProduto : c.custoTotal + c.custoArmazenagem)}</div></div>
                   <div><div className="text-xs text-slate-400">Preço</div><div className="font-data text-sm font-semibold" style={{ color: "var(--ink)" }}>{brl(c.preco)}</div></div>
                   <div><div className="text-xs text-slate-400">Lucro</div><div className="font-data text-sm font-semibold" style={{ color: lucroPos ? "#059669" : "#e11d48" }}>{brl(c.lucro)}</div></div>
                 </div>
-                <p className="text-xs text-slate-400 mt-1.5 text-center">margem de {num(c.margemReal)}% sobre o custo · taxa {num(c.taxa, 1)}%</p>
+                <p className="text-xs text-slate-400 mt-1.5 text-center">
+                  {config.metodoPrecificacao === "markup_divisor"
+                    ? `${num(c.margem)}% margem lucro · margem real ${num(c.margemReal)}% · taxa ${num(c.taxa, 1)}%`
+                    : `margem de ${num(c.margemReal)}% sobre custo · taxa ${num(c.taxa, 1)}%`
+                  }
+                </p>
                 <div className="mt-3 flex gap-1 pt-3" style={{ borderTop: "1px solid var(--line)" }}>
                   <button onClick={() => onEdit(p)} className="flex-1 inline-flex items-center justify-center gap-1 text-xs font-medium py-1.5 rounded-lg hover:bg-slate-100 transition text-slate-600"><Pencil size={13} /> Editar</button>
                   <button onClick={() => onDelete(p)} className="flex-1 inline-flex items-center justify-center gap-1 text-xs font-medium py-1.5 rounded-lg hover:bg-rose-50 transition text-rose-600"><Trash2 size={13} /> Excluir</button>
@@ -785,19 +807,23 @@ function ProductForm({ initial, filaments, config, onSave, onClose }) {
   const splitM = initial ? Math.round(((initial.tempoHoras || 0) % 1) * 60) : "";
   const [p, setP] = useState(
     initial
-      ? { ...initial, horas: String(splitH), minutos: String(splitM), gramasUsadas: String(initial.gramasUsadas ?? ""), custosExtras: String(initial.custosExtras ?? ""), margem: initial.margem != null ? String(initial.margem) : "", precoVenda: initial.precoVenda ? String(initial.precoVenda) : "", estoqueProduto: String(initial.estoqueProduto ?? "") }
-      : { nome: "", filamentoId: filaments[0] ? filaments[0].id : "", gramasUsadas: "", horas: "", minutos: "", custosExtras: "", plataforma: plats[0] || "", margem: "", precoVenda: "", estoqueProduto: "" }
+      ? { ...initial, horas: String(splitH), minutos: String(splitM), gramasUsadas: String(initial.gramasUsadas ?? ""), custosExtras: String(initial.custosExtras ?? ""), custoArmazenagem: String(initial.custoArmazenagem ?? ""), margem: initial.margem != null ? String(initial.margem) : "", precoVenda: initial.precoVenda ? String(initial.precoVenda) : "", estoqueProduto: String(initial.estoqueProduto ?? "") }
+      : { nome: "", filamentoId: filaments[0] ? filaments[0].id : "", gramasUsadas: "", horas: "", minutos: "", custosExtras: "", custoArmazenagem: "", plataforma: plats[0] || "", margem: "", precoVenda: "", estoqueProduto: "" }
   );
   const set = (k) => (v) => setP((s) => ({ ...s, [k]: v }));
   const fil = filaments.find((f) => f.id === p.filamentoId);
-  const draft = { gramasUsadas: parseNum(p.gramasUsadas), tempoHoras: parseNum(p.horas) + parseNum(p.minutos) / 60, custosExtras: parseNum(p.custosExtras), plataforma: p.plataforma, margem: p.margem === "" ? null : parseNum(p.margem), precoVenda: parseNum(p.precoVenda) };
+  const draft = { gramasUsadas: parseNum(p.gramasUsadas), tempoHoras: parseNum(p.horas) + parseNum(p.minutos) / 60, custosExtras: parseNum(p.custosExtras), custoArmazenagem: parseNum(p.custoArmazenagem), plataforma: p.plataforma, margem: p.margem === "" ? null : parseNum(p.margem), precoVenda: parseNum(p.precoVenda) };
   const c = calcProduto(draft, fil, config);
   const save = () => {
     if (!p.nome.trim() || !p.filamentoId) return;
-    onSave({ id: p.id || uid(), nome: p.nome.trim(), filamentoId: p.filamentoId, gramasUsadas: parseNum(p.gramasUsadas), tempoHoras: parseNum(p.horas) + parseNum(p.minutos) / 60, custosExtras: parseNum(p.custosExtras), plataforma: p.plataforma, margem: p.margem === "" ? null : parseNum(p.margem), precoVenda: parseNum(p.precoVenda) || null, estoqueProduto: parseNum(p.estoqueProduto) });
+    onSave({ id: p.id || uid(), nome: p.nome.trim(), filamentoId: p.filamentoId, gramasUsadas: parseNum(p.gramasUsadas), tempoHoras: parseNum(p.horas) + parseNum(p.minutos) / 60, custosExtras: parseNum(p.custosExtras), custoArmazenagem: parseNum(p.custoArmazenagem), plataforma: p.plataforma, margem: p.margem === "" ? null : parseNum(p.margem), precoVenda: parseNum(p.precoVenda) || null, estoqueProduto: parseNum(p.estoqueProduto) });
   };
   const filOptions = filaments.map((f) => f.nome);
   const filByName = (nome) => filaments.find((f) => f.nome === nome);
+
+  const despesasFixasPct = (config.despesasFixasMensais || 0) / (config.faturamentoMensal || 1) * 100;
+  const impostosPct = config.impostosPct || 0;
+
   return (
     <Modal wide title={initial ? "Editar produto" : "Novo produto"} subtitle="Custo e preço calculados em tempo real" onClose={onClose}
       footer={<><GhostBtn onClick={onClose}>Cancelar</GhostBtn><PrimaryBtn onClick={save}>Salvar</PrimaryBtn></>}>
@@ -805,10 +831,17 @@ function ProductForm({ initial, filaments, config, onSave, onClose }) {
         <div className="space-y-4">
           <Field label="Nome do produto" value={p.nome} onChange={set("nome")} placeholder="Ex.: Vaso geométrico" />
           <Field label="Filamento" value={fil ? fil.nome : ""} onChange={(nome) => set("filamentoId")(filByName(nome)?.id || "")} options={filOptions} />
+          
           <div className="grid grid-cols-2 gap-3">
             <Field label="Filamento usado" value={p.gramasUsadas} onChange={set("gramasUsadas")} suffix="g" type="num" />
-            <Field label="Custos extras" value={p.custosExtras} onChange={set("custosExtras")} suffix="R$" type="num" help="Embalagem, ímãs, kit, etc." />
+            <Field label="Unidades em estoque" value={p.estoqueProduto} onChange={set("estoqueProduto")} suffix="un" type="num" />
           </div>
+
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="Custos extras" value={p.custosExtras} onChange={set("custosExtras")} suffix="R$" type="num" help="Embalagem, frete, etc." />
+            <Field label="Armazenagem (estoque)" value={p.custoArmazenagem} onChange={set("custoArmazenagem")} suffix="R$" type="num" help="Custo por unidade." />
+          </div>
+
           <div>
             <span className="block text-xs font-medium text-slate-500 mb-1">Tempo de impressão</span>
             <div className="grid grid-cols-2 gap-3">
@@ -820,38 +853,77 @@ function ProductForm({ initial, filaments, config, onSave, onClose }) {
               </div>
             </div>
           </div>
+          
           <Field label="Canal principal de venda" value={p.plataforma} onChange={set("plataforma")} options={plats.length ? plats : ["—"]} help="Usado no preço sugerido. A venda real você escolhe ao registrar." />
-          <div className="grid grid-cols-2 gap-3">
-            <Field label="Margem sobre custo" value={p.margem} onChange={set("margem")} suffix="%" type="num" help={`Padrão: ${config.margemPadrao}%`} />
-            <Field label="Unidades em estoque" value={p.estoqueProduto} onChange={set("estoqueProduto")} suffix="un" type="num" />
-          </div>
+          
+          <Field 
+            label={config.metodoPrecificacao === "markup_divisor" ? "Margem de lucro (%)" : "Margem sobre custo"} 
+            value={p.margem} 
+            onChange={set("margem")} 
+            suffix="%" 
+            type="num" 
+            help={`Padrão: ${config.margemPadrao}%`} 
+          />
+
           <Field label="Preço de venda (opcional)" value={p.precoVenda} onChange={set("precoVenda")} suffix="R$" type="num" help="Vazio = usa o preço sugerido." />
         </div>
         <div>
           <div className="rounded-xl overflow-hidden" style={{ border: "1px solid var(--line)" }}>
-            <div className="px-4 py-3" style={{ background: "#14181F" }}><span className="text-xs font-medium uppercase tracking-wide text-slate-300">Composição do custo</span></div>
+            <div className="px-4 py-3" style={{ background: "#14181F" }}><span className="text-xs font-medium uppercase tracking-wide text-slate-300">Composição do custo de produção</span></div>
             <div className="p-4 space-y-2 text-sm bg-white">
               <Row label={`Filamento (${num(draft.gramasUsadas)} g × ${brl(c.cpg)})`} value={brl(c.custoFil)} />
               <Row label={`Energia (${horasFmt(draft.tempoHoras)} · ${config.potenciaW} W)`} value={brl(c.custoEnergia)} />
               {config.maoDeObraHora > 0 && <Row label="Mão de obra" value={brl(c.custoMao)} />}
               <Row label="Custos extras" value={brl(c.extras)} />
+              {c.custoArmazenagem > 0 && <Row label="Armazenagem" value={brl(c.custoArmazenagem)} />}
               <Row label={`Buffer de falha (${config.custoFalhaPct}%)`} value={brl(c.buffer)} />
               <div className="flex items-center justify-between pt-2 mt-1" style={{ borderTop: "1px dashed var(--line)" }}>
-                <span className="font-semibold" style={{ color: "var(--ink)" }}>Custo total</span><span className="font-data font-bold" style={{ color: "var(--ink)" }}>{brl(c.custoTotal)}</span>
+                <span className="font-semibold" style={{ color: "var(--ink)" }}>Custo unitário base</span><span className="font-data font-bold" style={{ color: "var(--ink)" }}>{brl(c.custoTotal + c.custoArmazenagem)}</span>
               </div>
             </div>
+
+            {config.metodoPrecificacao === "markup_divisor" && (
+              <div className="p-4 space-y-2 text-sm bg-white" style={{ borderTop: "1px solid var(--line)" }}>
+                <div className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">Impostos e Rateio Fixo (estimado)</div>
+                <Row label={`Taxa de canal (${num(c.taxa, 1)}%)`} value={brl(c.precoSugerido * (c.taxa / 100))} />
+                <Row label={`Impostos sobre venda (${num(impostosPct, 1)}%)`} value={brl(c.precoSugerido * (impostosPct / 100))} />
+                <Row label={`Custo fixo rateado (${num(despesasFixasPct, 1)}%)`} value={brl(c.precoSugerido * (despesasFixasPct / 100))} />
+                <div className="flex items-center justify-between pt-2" style={{ borderTop: "1px dashed var(--line)" }}>
+                  <span className="font-semibold" style={{ color: "var(--ink)" }}>Custo Total do Produto</span><span className="font-data font-bold" style={{ color: "var(--ink)" }}>{brl(c.custoTotalProduto)}</span>
+                </div>
+              </div>
+            )}
+
             <div className="p-4 space-y-2" style={{ background: "var(--accent-soft)" }}>
               <div className="flex items-center justify-between"><span className="text-sm" style={{ color: "var(--accent-deep)" }}>Preço sugerido</span><span className="font-data font-bold text-lg" style={{ color: "var(--accent-deep)" }}>{brl(c.precoSugerido)}</span></div>
-              <p className="text-xs" style={{ color: "var(--accent-deep)" }}>para {num(c.margem)}% de margem, já cobrindo a taxa de {num(c.taxa, 1)}% do canal.</p>
+              <p className="text-xs" style={{ color: "var(--accent-deep)" }}>
+                {config.metodoPrecificacao === "markup_divisor" 
+                  ? `para margem de lucro de ${num(c.margem)}% do preço final (Nuvemshop).`
+                  : `para margem de ${num(c.margem)}% sobre o custo, já cobrindo a taxa de ${num(c.taxa, 1)}% do canal.`
+                }
+              </p>
             </div>
             {draft.precoVenda > 0 && (
               <div className="p-4 space-y-2 text-sm bg-white" style={{ borderTop: "1px solid var(--line)" }}>
                 <Row label="Preço de venda" value={brl(draft.precoVenda)} />
-                <Row label={`Receita após taxa (${num(c.taxa, 1)}%)`} value={brl(c.receitaLiquida)} />
+                {config.metodoPrecificacao === "markup_divisor" ? (
+                  <>
+                    <Row label={`Taxa de canal (${num(c.taxa, 1)}%)`} value={brl(draft.precoVenda * (c.taxa / 100))} />
+                    <Row label={`Impostos sobre venda (${num(impostosPct, 1)}%)`} value={brl(draft.precoVenda * (impostosPct / 100))} />
+                    <Row label={`Custo fixo rateado (${num(despesasFixasPct, 1)}%)`} value={brl(draft.precoVenda * (despesasFixasPct / 100))} />
+                  </>
+                ) : (
+                  <Row label={`Receita após taxa (${num(c.taxa, 1)}%)`} value={brl(c.receitaLiquida)} />
+                )}
                 <div className="flex items-center justify-between pt-2" style={{ borderTop: "1px dashed var(--line)" }}>
                   <span className="font-semibold" style={{ color: "var(--ink)" }}>Lucro por unidade</span><span className="font-data font-bold" style={{ color: c.lucro >= 0 ? "#059669" : "#e11d48" }}>{brl(c.lucro)}</span>
                 </div>
-                <p className="text-xs text-slate-400 text-right">margem de {num(c.margemReal)}% sobre o custo</p>
+                <p className="text-xs text-slate-400 text-right">
+                  {config.metodoPrecificacao === "markup_divisor"
+                    ? `margem real de ${num(c.margemReal)}% sobre o custo unitário`
+                    : `margem de ${num(c.margemReal)}% sobre o custo`
+                  }
+                </p>
               </div>
             )}
           </div>
@@ -861,9 +933,7 @@ function ProductForm({ initial, filaments, config, onSave, onClose }) {
   );
 }
 
-/* ------------------------------------------------------------------ */
-/*  Vendas                                                             */
-/* ------------------------------------------------------------------ */
+// === Vendas ===
 function Vendas({ sales, products, filaments, config, onAdd, onDelete, go, onExportCSV }) {
   const [periodo, setPeriodo] = useState("mes");
   const stats = useVendaStats(sales, products, filaments, config, periodo);
@@ -1036,15 +1106,14 @@ function SaleForm({ products, filaments, config, onSave, onClose }) {
   );
 }
 
-/* ------------------------------------------------------------------ */
-/*  Configurações                                                      */
-/* ------------------------------------------------------------------ */
 function Configuracoes({ config, setConfig, onSeed, onClear, onExport, onImport }) {
   const set = (k) => (v) => setConfig((c) => ({ ...c, [k]: parseNum(v) }));
   const fileRef = useRef(null);
   const updPlat = (id, field, val) => setConfig((c) => ({ ...c, plataformas: c.plataformas.map((p) => (p.id === id ? { ...p, [field]: field === "taxa" ? val : val } : p)) }));
   const addPlat = () => setConfig((c) => ({ ...c, plataformas: [...(c.plataformas || []), { id: uid(), nome: "Nova plataforma", taxa: 0 }] }));
   const delPlat = (id) => setConfig((c) => ({ ...c, plataformas: c.plataformas.filter((p) => p.id !== id) }));
+
+  const despesasFixasPct = (config.despesasFixasMensais || 0) / (config.faturamentoMensal || 1) * 100;
 
   return (
     <div className="space-y-4 max-w-3xl">
@@ -1054,7 +1123,35 @@ function Configuracoes({ config, setConfig, onSeed, onClear, onExport, onImport 
       </div>
 
       <Card className="p-5">
-        <div className="flex items-center gap-2 mb-4"><Zap size={16} style={{ color: "var(--accent)" }} /><h3 className="font-display font-semibold" style={{ color: "var(--ink)" }}>Custos de operação</h3></div>
+        <div className="flex items-center gap-2 mb-2"><TrendingUp size={16} style={{ color: "var(--accent)" }} /><h3 className="font-display font-semibold" style={{ color: "var(--ink)" }}>Método de precificação</h3></div>
+        <p className="text-sm text-slate-500 mb-4">Escolha a fórmula usada para sugerir seus preços e calcular os lucros.</p>
+        <div className="space-y-4">
+          <Field 
+            label="Fórmula de cálculo" 
+            value={config.metodoPrecificacao === "markup_divisor" ? "Margem sobre Preço (Nuvemshop)" : "Markup sobre Custo (Atual)"} 
+            onChange={(val) => setConfig((c) => ({ ...c, metodoPrecificacao: val === "Margem sobre Preço (Nuvemshop)" ? "markup_divisor" : "markup_custo" }))} 
+            options={["Markup sobre Custo (Atual)", "Margem sobre Preço (Nuvemshop)"]} 
+          />
+
+          {config.metodoPrecificacao === "markup_divisor" && (
+            <div className="p-4 rounded-lg bg-slate-50 border border-slate-100 space-y-4">
+              <div className="text-xs font-semibold text-slate-500 uppercase tracking-wider">Despesas Fixas e Impostos da Loja</div>
+              <div className="grid sm:grid-cols-3 gap-4">
+                <Field label="Despesas fixas mensais" value={config.despesasFixasMensais} onChange={set("despesasFixasMensais")} suffix="R$/mês" type="num" help="Aluguel, salários, software, etc." />
+                <Field label="Faturamento mensal aproximado" value={config.faturamentoMensal} onChange={set("faturamentoMensal")} suffix="R$" type="num" help="Faturamento médio estimado." />
+                <Field label="Impostos sobre venda" value={config.impostosPct} onChange={set("impostosPct")} suffix="%" type="num" help="Simples Nacional, DAS, ICMS, etc." />
+              </div>
+              <div className="pt-3 border-t border-dashed border-slate-200 flex items-center justify-between text-xs text-slate-500">
+                <span>Participação de custos fixos no faturamento (DF %):</span>
+                <span className="font-data font-semibold text-slate-700">{num(despesasFixasPct, 2)}%</span>
+              </div>
+            </div>
+          )}
+        </div>
+      </Card>
+
+      <Card className="p-5">
+        <div className="flex items-center gap-2 mb-4"><Zap size={16} style={{ color: "var(--accent)" }} /><h3 className="font-display font-semibold" style={{ color: "var(--ink)" }}>Custos de operação da impressora</h3></div>
         <div className="grid sm:grid-cols-2 gap-4">
           <Field label="Custo da energia" value={config.energiaKwh} onChange={set("energiaKwh")} suffix="R$/kWh" type="num" help="Veja na sua conta de luz." />
           <Field label="Potência média da impressora" value={config.potenciaW} onChange={set("potenciaW")} suffix="W" type="num" help="FDM costuma ficar entre 100 e 200 W." />
@@ -1067,7 +1164,14 @@ function Configuracoes({ config, setConfig, onSeed, onClear, onExport, onImport 
         <div className="flex items-center gap-2 mb-2"><CircleDollarSign size={16} style={{ color: "var(--accent)" }} /><h3 className="font-display font-semibold" style={{ color: "var(--ink)" }}>Margem e plataformas</h3></div>
         <p className="text-sm text-slate-500 mb-4">Adicione as plataformas onde você vende e a taxa de cada uma. Você pode renomear, criar e remover livremente.</p>
         <div className="max-w-xs mb-4">
-          <Field label="Margem padrão" value={config.margemPadrao} onChange={set("margemPadrao")} suffix="%" type="num" help={`Padrão: ${config.margemPadrao}%`} />
+          <Field 
+            label={config.metodoPrecificacao === "markup_divisor" ? "Margem padrão (%)" : "Margem padrão sobre custo (%)"} 
+            value={config.margemPadrao} 
+            onChange={set("margemPadrao")} 
+            suffix="%" 
+            type="num" 
+            help={`Padrão: ${config.margemPadrao}%`} 
+          />
         </div>
         <div className="space-y-2">
           {(config.plataformas || []).map((p) => (
@@ -1100,9 +1204,7 @@ function Configuracoes({ config, setConfig, onSeed, onClear, onExport, onImport 
   );
 }
 
-/* ------------------------------------------------------------------ */
-/*  App                                                                */
-/* ------------------------------------------------------------------ */
+// === App ===
 export default function App() {
   const [tab, setTab] = useState("painel");
   const [config, setConfig] = useState(DEFAULT_CONFIG);
@@ -1129,6 +1231,7 @@ export default function App() {
   const [authPassword, setAuthPassword] = useState("");
   const [authError, setAuthError] = useState("");
   const [isActive, setIsActive] = useState(false);
+  const [expiresAt, setExpiresAt] = useState(null);
   const lastFetchedDataRef = useRef("");
 
   /* relógio para progresso ao vivo */
@@ -1187,7 +1290,17 @@ export default function App() {
         const dataStr = JSON.stringify(d);
         lastFetchedDataRef.current = dataStr;
 
-        setIsActive(!!d.active);
+        let active = !!d.active;
+        if (d.expiresAt) {
+          const expiryDate = d.expiresAt.toDate();
+          setExpiresAt(expiryDate);
+          if (expiryDate < new Date()) {
+            active = false;
+          }
+        } else {
+          setExpiresAt(null);
+        }
+        setIsActive(active);
         if (d.config) setConfig(d.config);
         if (Array.isArray(d.filaments)) setFilaments(d.filaments);
         if (Array.isArray(d.products)) setProducts(d.products);
@@ -1196,6 +1309,7 @@ export default function App() {
       } else {
         // Se o documento não existe, inicializa
         setIsActive(false);
+        setExpiresAt(null);
         const initialStr = JSON.stringify({ config: DEFAULT_CONFIG, filaments: [], products: [], printers: [], sales: [] });
         lastFetchedDataRef.current = initialStr;
       }
@@ -1557,6 +1671,11 @@ export default function App() {
             ) : savedAt ? (
               <span className="text-slate-400 font-data">salvo na nuvem</span>
             ) : null}
+            {expiresAt && (
+              <span className="px-2 py-0.5 rounded text-[10px] font-semibold bg-emerald-500/15 text-emerald-400 border border-emerald-500/20 font-data">
+                Acesso até {expiresAt.toLocaleDateString("pt-BR")}
+              </span>
+            )}
             <span className="text-slate-300 font-medium truncate max-w-40 hidden sm:inline">{user.email}</span>
             <button onClick={handleLogout} className="p-1.5 rounded-lg text-slate-400 hover:text-rose-500 hover:bg-slate-800 transition" title="Sair da conta">
               <LogOut size={16} />
@@ -1612,7 +1731,8 @@ function PaymentScreen({ user, handleLogout, authError, setAuthError }) {
       try {
         setLoading(true);
         setAuthError("");
-        const res = await fetch("http://localhost:3001/api/create-payment", {
+        const backendUrl = import.meta.env.VITE_API_URL || "http://localhost:3001";
+        const res = await fetch(`${backendUrl}/api/create-payment`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ uid: user.uid, email: user.email })
@@ -1641,23 +1761,23 @@ function PaymentScreen({ user, handleLogout, authError, setAuthError }) {
           <div className="w-12 h-12 rounded-xl flex items-center justify-center mx-auto mb-3" style={{ background: "var(--accent)" }}>
             <Layers size={24} color="#fff" />
           </div>
-          <h1 className="font-display font-bold text-2xl tracking-tight">Ativação da Conta</h1>
-          <p className="text-xs text-slate-400 mt-1">Liberação instantânea do painel Camada</p>
+          <h1 className="font-display font-bold text-2xl tracking-tight">Assinatura Mensal</h1>
+          <p className="text-xs text-slate-400 mt-1">Acesso por 30 dias renovável</p>
         </div>
 
         <div className="p-6 space-y-5">
           <div className="text-center space-y-1">
-            <h2 className="text-lg font-display font-semibold" style={{ color: "var(--ink)" }}>Adquira o Acesso Completo</h2>
-            <p className="text-xs text-slate-500">Conclua o pagamento único para liberar sua conta do painel 3D.</p>
+            <h2 className="text-lg font-display font-semibold" style={{ color: "var(--ink)" }}>Assine o Camada 3D</h2>
+            <p className="text-xs text-slate-500">Conclua o pagamento para liberar seu acesso completo por 30 dias.</p>
           </div>
 
           <div className="p-4 rounded-xl space-y-3" style={{ background: "var(--accent-soft)" }}>
             <div className="flex items-baseline justify-between">
-              <span className="text-sm font-semibold" style={{ color: "var(--accent-deep)" }}>Taxa Única de Ativação</span>
-              <span className="font-data font-bold text-xl" style={{ color: "var(--accent-deep)" }}>R$ 99,90</span>
+              <span className="text-sm font-semibold" style={{ color: "var(--accent-deep)" }}>Valor da Assinatura</span>
+              <span className="font-data font-bold text-xl" style={{ color: "var(--accent-deep)" }}>R$ 22,35 <span className="text-xs font-normal text-slate-500">/mês</span></span>
             </div>
             <div className="text-xs space-y-1.5" style={{ color: "var(--accent-deep)" }}>
-              <div className="flex items-center gap-1.5 font-medium">✓ Acesso Vitalício sem mensalidades</div>
+              <div className="flex items-center gap-1.5 font-medium">✓ Acesso Completo por 30 dias</div>
               <div className="flex items-center gap-1.5 font-medium">✓ Controle de Impressoras e Filamentos</div>
               <div className="flex items-center gap-1.5 font-medium">✓ Gráficos e Cálculo Automático de Custos</div>
               <div className="flex items-center gap-1.5 font-medium">✓ Sincronização em nuvem segura</div>

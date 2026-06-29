@@ -46,7 +46,7 @@ app.post("/api/create-payment", async (req, res) => {
     const preference = new Preference(mpClient);
     const response = await preference.create({
       body: {
-        items: [{ title: "Acesso Completo - Camada 3D", quantity: 1, unit_price: 99.90, currency_id: "BRL" }],
+        items: [{ title: "Assinatura Mensal - Camada 3D", quantity: 1, unit_price: 22.35, currency_id: "BRL" }],
         payer: { email },
         external_reference: uid,
         back_urls: {
@@ -95,13 +95,28 @@ app.post("/api/webhook/mp", async (req, res) => {
       if (payment.status === "approved") {
         const uid = payment.external_reference;
         if (uid && db) {
+          const userDoc = await db.collection("users").doc(uid).get();
+          let baseDate = new Date();
+          if (userDoc.exists) {
+            const userData = userDoc.data();
+            if (userData.expiresAt) {
+              const currentExpiry = userData.expiresAt.toDate();
+              if (currentExpiry > baseDate) {
+                baseDate = currentExpiry;
+              }
+            }
+          }
+          const expiresAt = new Date(baseDate);
+          expiresAt.setDate(expiresAt.getDate() + 30);
+
           await db.collection("users").doc(uid).set({
             active: true,
             paid: true,
             paymentId: String(paymentId),
-            paidAt: admin.firestore.FieldValue.serverTimestamp()
+            paidAt: admin.firestore.FieldValue.serverTimestamp(),
+            expiresAt: admin.firestore.Timestamp.fromDate(expiresAt)
           }, { merge: true });
-          if (process.env.NODE_ENV !== "production") console.log(`Usuário ${uid} ativado após pagamento ${paymentId}`);
+          if (process.env.NODE_ENV !== "production") console.log(`Usuário ${uid} ativado até ${expiresAt.toISOString()} após pagamento ${paymentId}`);
         }
       }
     } catch (error) {
